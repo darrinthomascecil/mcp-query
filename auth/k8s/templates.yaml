@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth2-proxy-templates
+data:
+  error.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Access Denied</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          font-family: system-ui, sans-serif; background: #0f1117; color: #e1e4e8;
+          display: flex; align-items: center; justify-content: center; min-height: 100vh;
+          padding: 2rem;
+        }
+        .card {
+          background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+          padding: 3rem; max-width: 480px; width: 100%; text-align: center;
+        }
+        .code { font-size: 4rem; font-weight: 700; color: #f85149; margin-bottom: 0.5rem; }
+        .title { font-size: 1.3rem; color: #e1e4e8; margin-bottom: 1rem; }
+        .message { color: #8b949e; font-size: 0.95rem; line-height: 1.6; margin-bottom: 2rem; }
+        .actions { display: flex; gap: 0.75rem; justify-content: center; }
+        a {
+          display: inline-block; padding: 0.6rem 1.5rem; font-size: 0.95rem; font-weight: 600;
+          border-radius: 6px; text-decoration: none; cursor: pointer;
+        }
+        .btn-primary { background: #238636; color: #fff; }
+        .btn-primary:hover { background: #2ea043; }
+        .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+        .btn-secondary:hover { background: #30363d; }
+        .footer { margin-top: 2rem; color: #484f58; font-size: 0.75rem; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="code">{{.StatusCode}}</div>
+        <div class="title">Access Denied</div>
+        <div class="message">
+          {{if eq .StatusCode 403}}
+            You are not authorized to access this application.
+            Contact your administrator to request access.
+          {{else if eq .StatusCode 500}}
+            Something went wrong during authentication.
+            Try signing in again.
+          {{else}}
+            {{.Message}}
+          {{end}}
+        </div>
+        <div class="actions">
+          <a href="/" class="btn-secondary">Go back</a>
+          <a href="/oauth2/sign_out?rd=/" class="btn-primary">Sign in as different user</a>
+        </div>
+        <div class="footer">MCP Query</div>
+      </div>
+    </body>
+    </html>
+  sign_in.html: |
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Sign In - MCP Query</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+          font-family: system-ui, sans-serif; background: #0f1117; color: #e1e4e8;
+          display: flex; align-items: center; justify-content: center; min-height: 100vh;
+          padding: 2rem;
+        }
+        .card {
+          background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+          padding: 3rem; max-width: 480px; width: 100%; text-align: center;
+        }
+        h1 { font-size: 1.4rem; color: #58a6ff; margin-bottom: 0.5rem; }
+        .subtitle { color: #8b949e; font-size: 0.95rem; margin-bottom: 2rem; }
+        form { display: inline; }
+        button {
+          padding: 0.75rem 2rem; font-size: 1rem; font-weight: 600;
+          background: #238636; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+        }
+        button:hover { background: #2ea043; }
+        .footer { margin-top: 2rem; color: #484f58; font-size: 0.75rem; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>MCP Query</h1>
+        <div class="subtitle">Sign in with your organizational account</div>
+        <form method="GET" action="{{.ProxyPrefix}}/start">
+          <input type="hidden" name="rd" value="{{.Redirect}}"/>
+          <button type="submit">Sign in with Microsoft</button>
+        </form>
+        <div class="footer">Protected by Entra ID</div>
+      </div>
+    </body>
+    </html>
