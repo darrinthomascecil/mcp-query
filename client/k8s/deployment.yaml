@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-query
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-query
+  template:
+    metadata:
+      labels:
+        app: mcp-query
+    spec:
+      containers:
+        - name: mcp-query
+          image: ghcr.io/OWNER/mcp-query:latest  # Replace OWNER
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-query-secret
+                  key: anthropic-api-key
+            - name: MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-query-config
+                  key: mcp-url
+            - name: ANTHROPIC_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: mcp-query-config
+                  key: anthropic-model
+                  optional: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false

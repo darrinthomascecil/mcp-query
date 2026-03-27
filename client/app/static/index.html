@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Query</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f1117; color: #e1e4e8; padding: 2rem; }
+    h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #58a6ff; }
+    .input-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+    input[type="text"] {
+      flex: 1; padding: 0.6rem 0.8rem; font-size: 0.95rem;
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e1e4e8;
+      outline: none;
+    }
+    input[type="text"]:focus { border-color: #58a6ff; }
+    button {
+      padding: 0.6rem 1.2rem; font-size: 0.95rem; font-weight: 600;
+      background: #238636; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+    }
+    button:hover { background: #2ea043; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #output {
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      padding: 1rem; min-height: 200px; white-space: pre-wrap; word-break: break-word;
+      font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 0.85rem; line-height: 1.6;
+      overflow: auto; max-height: 70vh;
+    }
+    .error { color: #f85149; }
+    .dim { color: #8b949e; }
+    .spinner { display: inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <h1>MCP Query</h1>
+  <div class="input-row">
+    <input type="text" id="q" placeholder="Ask a question about your cluster..." autofocus />
+    <button id="run" onclick="runQuery()">Ask</button>
+  </div>
+  <div id="output"><span class="dim">Ask a question using natural language.</span></div>
+  <script>
+    async function runQuery() {
+      const q = document.getElementById("q").value.trim();
+      const out = document.getElementById("output");
+      const btn = document.getElementById("run");
+      if (!q) return;
+
+      btn.disabled = true;
+      out.innerHTML = '<span class="dim"><span class="spinner">&#9696;</span> Thinking...</span>';
+
+      try {
+        const res = await fetch("/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: q })
+        });
+        const data = await res.json();
+        if (data.error) {
+          out.innerHTML = '<span class="error">' + escapeHtml(data.error) + '</span>';
+        } else {
+          out.textContent = data.answer;
+        }
+      } catch (e) {
+        out.innerHTML = '<span class="error">Error: ' + escapeHtml(e.message) + '</span>';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    document.getElementById("q").addEventListener("keydown", e => {
+      if (e.key === "Enter") runQuery();
+    });
+  </script>
+</body>
+</html>

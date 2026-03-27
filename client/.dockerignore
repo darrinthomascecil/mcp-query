@@ -1,0 +1,8 @@
+.env
+.env.example
+.git
+.gitignore
+k8s/
+README.md
+LICENSE
+__pycache__/
