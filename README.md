@@ -7,6 +7,40 @@ client/   — Web UI + Python backend that sends questions to Claude
 server/   — AKS MCP server that provides Kubernetes/Azure tools
 ```
 
+## From scratch
+
+Everything you need: a Kubernetes cluster, the MCP server, and the client.
+
+### Prerequisites
+
+- [kind](https://kind.sigs.k8s.io/) (or any Kubernetes cluster)
+- [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- Python 3.9+
+- An [Anthropic API key](https://console.anthropic.com/settings/keys)
+
+### Setup
+
+```bash
+git clone https://github.com/darrinthomascecil/mcp-query.git
+cd mcp-query
+
+# 1. Create a cluster (skip if you already have one)
+kind create cluster
+
+# 2. Deploy the MCP server
+kubectl apply -f server/k8s/
+kubectl wait --for=condition=ready pod -l app=aks-mcp -n aks-mcp --timeout=120s
+
+# 3. Port-forward so the client can reach the MCP server
+kubectl port-forward -n aks-mcp svc/aks-mcp 8000:8000 &
+
+# 4. Run the client
+cd client/app
+ANTHROPIC_API_KEY=sk-ant-... MCP_URL=http://localhost:8000/mcp python3 server.py
+```
+
+Open http://localhost:8080 and ask a question.
+
 ## Quick start (Kubernetes)
 
 ```bash
