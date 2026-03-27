@@ -58,13 +58,18 @@ APP_ID=$(az ad app create \
 echo "App ID: ${APP_ID}"
 
 # Add openid, email, profile API permissions (Microsoft Graph)
+# These are the well-known permission GUIDs for Microsoft Graph delegated scopes
 GRAPH_API="00000003-0000-0000-c000-000000000000"
+OPENID_SCOPE="37f7f235-527c-4136-accd-4a02d197296e"
+EMAIL_SCOPE="64a6cdd6-aab1-4aaf-94b8-3cc8405e90d0"
+PROFILE_SCOPE="14dad69e-099b-42c9-810b-d002981feec1"
+
 az ad app permission add --id "$APP_ID" \
   --api "$GRAPH_API" \
   --api-permissions \
-    "openid=Scope" \
-    "email=Scope" \
-    "profile=Scope"
+    "${OPENID_SCOPE}=Scope" \
+    "${EMAIL_SCOPE}=Scope" \
+    "${PROFILE_SCOPE}=Scope"
 
 echo "=== Granting admin consent ==="
 az ad app permission admin-consent --id "$APP_ID" || \
