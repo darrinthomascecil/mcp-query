@@ -271,6 +271,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.debug("%s %s", self.client_address[0], fmt % args)
 
 
+def _eager_mcp_connect(mcp, retries=5, delay=5):
+    """Connect to MCP in the background with retries for startup ordering."""
+    import time
+    for attempt in range(retries):
+        try:
+            mcp.claude_tools  # Triggers the lazy connection
+            return
+        except Exception as exc:
+            if attempt < retries - 1:
+                log.warning("MCP connect failed (%s), retrying in %ds...", exc, delay)
+                time.sleep(delay)
+            else:
+                log.error("Could not connect to MCP server after %d attempts: %s", retries, exc)
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
@@ -287,10 +302,12 @@ def main():
     else:
         log.warning("No index.html found at %s", index_path)
 
-    # MCP is optional at startup — connects lazily on first query
+    # MCP is optional at startup — connects in the background if URL is set
     if MCP_URL:
         Handler.mcp = MCPClient(MCP_URL)
-        log.info("MCP server configured: %s (will connect on first query)", MCP_URL)
+        log.info("MCP server: %s", MCP_URL)
+        # Connect eagerly in background so readiness probe passes
+        threading.Thread(target=_eager_mcp_connect, args=(Handler.mcp,), daemon=True).start()
     else:
         log.warning("No MCP_URL set — queries will fail until one is configured")
 
