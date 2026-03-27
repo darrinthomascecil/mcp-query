@@ -23,17 +23,18 @@ spec:
                 secretKeyRef:
                   name: mcp-query-secret
                   key: anthropic-api-key
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-query-secret
+                  key: openai-api-key
+                  optional: true
             - name: MCP_URL
               valueFrom:
                 configMapKeyRef:
                   name: mcp-query-config
                   key: mcp-url
-            - name: ANTHROPIC_MODEL
-              valueFrom:
-                configMapKeyRef:
-                  name: mcp-query-config
-                  key: anthropic-model
-                  optional: true
           resources:
             requests:
               cpu: 50m

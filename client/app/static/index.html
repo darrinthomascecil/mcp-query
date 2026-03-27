@@ -21,26 +21,199 @@
     }
     button:hover { background: #2ea043; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    select {
+      padding: 0.6rem 0.8rem; font-size: 0.85rem;
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #e1e4e8;
+      outline: none; cursor: pointer;
+    }
+    select:focus { border-color: #58a6ff; }
+    #mic { background: #21262d; font-size: 1.1rem; padding: 0.6rem 0.8rem; }
+    #mic:hover { background: #30363d; }
+    #mic.recording { background: #da3633; animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
     #output {
       background: #161b22; border: 1px solid #30363d; border-radius: 6px;
       padding: 1rem; min-height: 200px; white-space: pre-wrap; word-break: break-word;
       font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 0.85rem; line-height: 1.6;
-      overflow: auto; max-height: 70vh;
+      overflow: auto; max-height: 50vh;
     }
     .error { color: #f85149; }
     .dim { color: #8b949e; }
     .spinner { display: inline-block; animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    #history-section { margin-top: 1.5rem; }
+    #history-section h2 { font-size: 1rem; color: #8b949e; margin-bottom: 0.75rem; }
+    #history-table {
+      width: 100%; border-collapse: collapse;
+    }
+    #history-table th {
+      text-align: left; padding: 0.5rem 0.75rem; color: #484f58; font-size: 0.75rem;
+      font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+      border-bottom: 1px solid #21262d;
+    }
+    #history-table td {
+      padding: 0.5rem 0.75rem; font-size: 0.85rem; color: #c9d1d9;
+      border-bottom: 1px solid #161b22; vertical-align: top;
+    }
+    #history-table tr { cursor: pointer; }
+    #history-table tr:hover td { background: #161b22; }
+    #history-table tr.active td { background: #161b22; color: #58a6ff; }
+    #history-table td.question { width: 30%; color: #58a6ff; }
+    #history-table td.answer {
+      width: 70%; white-space: pre-wrap; word-break: break-word;
+      font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 0.8rem;
+      color: #8b949e; max-height: 4.8rem; overflow: hidden;
+    }
+    #history-table tr.active td.answer { max-height: none; color: #c9d1d9; }
   </style>
 </head>
 <body>
   <h1>MCP Query</h1>
   <div class="input-row">
+    <select id="model"><option value="">Loading...</option></select>
     <input type="text" id="q" placeholder="Ask a question about your cluster..." autofocus />
+    <button id="mic" style="display:none" title="Hold to speak">&#127908;</button>
     <button id="run" onclick="runQuery()">Ask</button>
   </div>
-  <div id="output"><span class="dim">Ask a question using natural language.</span></div>
+  <div id="output"><span class="dim">Type or speak a question using natural language.</span></div>
+  <div id="history-section" style="display:none">
+    <h2>History</h2>
+    <table id="history-table">
+      <thead><tr><th>Question</th><th>Response</th></tr></thead>
+      <tbody id="history-body"></tbody>
+    </table>
+  </div>
   <script>
+    // --- Load available providers ---
+    (async function loadProviders() {
+      const sel = document.getElementById("model");
+      try {
+        const res = await fetch("/providers", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const data = await res.json();
+        sel.innerHTML = "";
+        if (!data.providers || data.providers.length === 0) {
+          sel.innerHTML = '<option value="">No providers</option>';
+          return;
+        }
+        const labels = { anthropic: "Claude", openai: "GPT" };
+        data.providers.forEach((p, i) => {
+          const opt = document.createElement("option");
+          opt.value = p.provider + ":" + p.model;
+          opt.textContent = (labels[p.provider] || p.provider) + " (" + p.model + ")";
+          sel.appendChild(opt);
+        });
+      } catch (e) {
+        sel.innerHTML = '<option value="">Error loading</option>';
+      }
+    })();
+
+    function getSelectedProvider() {
+      const val = document.getElementById("model").value;
+      if (!val || !val.includes(":")) return { provider: "", model: "" };
+      const [provider, ...rest] = val.split(":");
+      return { provider, model: rest.join(":") };
+    }
+
+    // --- History ---
+    const history = []; // { question, answer, time }
+
+    function addToHistory(question, answer) {
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      history.unshift({ question, answer, time });
+      renderHistory();
+    }
+
+    function renderHistory() {
+      const section = document.getElementById("history-section");
+      const tbody = document.getElementById("history-body");
+      if (history.length === 0) { section.style.display = "none"; return; }
+      section.style.display = "";
+      tbody.innerHTML = "";
+      history.forEach((item, i) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          '<td class="question">' + escapeHtml(item.question) + '</td>' +
+          '<td class="answer">' + escapeHtml(item.answer) + '</td>';
+        tr.onclick = () => showHistoryItem(i);
+        tbody.appendChild(tr);
+      });
+    }
+
+    function showHistoryItem(index) {
+      const item = history[index];
+      document.getElementById("q").value = item.question;
+      document.getElementById("output").textContent = item.answer;
+      document.querySelectorAll("#history-table tbody tr").forEach((tr, i) => {
+        tr.classList.toggle("active", i === index);
+      });
+    }
+
+    // --- Speech recognition ---
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let isRecording = false;
+
+    if (SpeechRecognition) {
+      const micBtn = document.getElementById("mic");
+      micBtn.style.display = "";
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = "en-US";
+
+      recognition.onresult = (e) => {
+        let transcript = "";
+        for (let i = 0; i < e.results.length; i++) {
+          transcript += e.results[i][0].transcript;
+        }
+        document.getElementById("q").value = transcript;
+      };
+
+      recognition.onend = () => {
+        isRecording = false;
+        micBtn.classList.remove("recording");
+      };
+
+      recognition.onerror = (e) => {
+        isRecording = false;
+        micBtn.classList.remove("recording");
+        if (e.error !== "no-speech" && e.error !== "aborted") {
+          document.getElementById("output").innerHTML =
+            '<span class="error">Mic error: ' + escapeHtml(e.error) + '</span>';
+        }
+      };
+
+      micBtn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        if (!recognition || isRecording) return;
+        document.getElementById("q").value = "";
+        recognition.start();
+        isRecording = true;
+        micBtn.classList.add("recording");
+      });
+
+      micBtn.addEventListener("mouseup", () => {
+        if (!recognition || !isRecording) return;
+        recognition.stop();
+        isRecording = false;
+        micBtn.classList.remove("recording");
+        setTimeout(() => {
+          if (document.getElementById("q").value.trim()) runQuery();
+        }, 300);
+      });
+
+      micBtn.addEventListener("mouseleave", () => {
+        if (!recognition || !isRecording) return;
+        recognition.stop();
+        isRecording = false;
+        micBtn.classList.remove("recording");
+        setTimeout(() => {
+          if (document.getElementById("q").value.trim()) runQuery();
+        }, 300);
+      });
+    }
+
+    // --- Query ---
     async function runQuery() {
       const q = document.getElementById("q").value.trim();
       const out = document.getElementById("output");
@@ -49,18 +222,21 @@
 
       btn.disabled = true;
       out.innerHTML = '<span class="dim"><span class="spinner">&#9696;</span> Thinking...</span>';
+      // Clear active highlight
+      document.querySelectorAll("#history-table tbody tr").forEach(tr => tr.classList.remove("active"));
 
       try {
         const res = await fetch("/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: q })
+          body: JSON.stringify({ question: q, ...getSelectedProvider() })
         });
         const data = await res.json();
         if (data.error) {
           out.innerHTML = '<span class="error">' + escapeHtml(data.error) + '</span>';
         } else {
           out.textContent = data.answer;
+          addToHistory(q, data.answer);
         }
       } catch (e) {
         out.innerHTML = '<span class="error">Error: ' + escapeHtml(e.message) + '</span>';

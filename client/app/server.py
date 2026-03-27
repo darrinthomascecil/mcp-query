@@ -1,4 +1,4 @@
-"""MCP Query — natural language interface to MCP servers via Claude."""
+"""MCP Query — natural language interface to MCP servers via LLMs."""
 
 import http.server
 import json
@@ -17,17 +17,12 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 MCP_URL = os.environ.get("MCP_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 PORT = int(os.environ.get("PORT", "8080"))
-SYSTEM_PROMPT = os.environ.get(
-    "SYSTEM_PROMPT",
-    "You help users query and manage systems via MCP tools. Be concise.",
-)
 MAX_TOOL_ROUNDS = int(os.environ.get("MAX_TOOL_ROUNDS", "10"))
 MAX_REQUEST_BYTES = int(os.environ.get("MAX_REQUEST_BYTES", "10000"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "120"))
 
-CLAUDE_API = "https://api.anthropic.com/v1/messages"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 log = logging.getLogger("mcp-query")
@@ -36,6 +31,141 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stdout,
 )
+
+
+# ---------------------------------------------------------------------------
+# LLM Providers
+# ---------------------------------------------------------------------------
+
+class AnthropicProvider:
+    name = "anthropic"
+    api_url = "https://api.anthropic.com/v1/messages"
+    default_model = "claude-sonnet-4-20250514"
+    system_prompt = "You help users query and manage Kubernetes clusters via MCP tools. Be concise and direct."
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+
+    def headers(self):
+        return {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+    def format_tools(self, mcp_tools):
+        return [
+            {"name": t["name"], "description": t["description"][:1024],
+             "input_schema": t["inputSchema"]}
+            for t in mcp_tools
+        ]
+
+    def build_request(self, messages, tools, model):
+        return json.dumps({
+            "model": model, "max_tokens": 4096,
+            "system": self.system_prompt,
+            "tools": tools, "messages": messages,
+        }).encode()
+
+    def parse_response(self, reply):
+        text_parts = []
+        tool_calls = []
+        for block in reply["content"]:
+            if block["type"] == "text":
+                text_parts.append(block["text"])
+            elif block["type"] == "tool_use":
+                tool_calls.append({
+                    "id": block["id"],
+                    "name": block["name"],
+                    "arguments": block["input"],
+                })
+        return text_parts, tool_calls
+
+    def append_assistant(self, messages, reply):
+        messages.append({"role": "assistant", "content": reply["content"]})
+
+    def append_tool_results(self, messages, results):
+        messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": r["id"], "content": r["content"]}
+            for r in results
+        ]})
+
+
+class OpenAIProvider:
+    name = "openai"
+    api_url = "https://api.openai.com/v1/chat/completions"
+    default_model = "gpt-4o"
+    system_prompt = "You help users query and manage Kubernetes clusters via tools. Be concise. Always use tools to answer questions rather than guessing."
+
+    def __init__(self, api_key):
+        self.api_key = api_key
+
+    def headers(self):
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+    def format_tools(self, mcp_tools):
+        return [
+            {"type": "function", "function": {
+                "name": t["name"],
+                "description": t["description"][:1024],
+                "parameters": t["inputSchema"],
+            }}
+            for t in mcp_tools
+        ]
+
+    def build_request(self, messages, tools, model):
+        return json.dumps({
+            "model": model, "max_tokens": 4096,
+            "messages": [{"role": "system", "content": self.system_prompt}] + messages,
+            "tools": tools,
+        }).encode()
+
+    def parse_response(self, reply):
+        text_parts = []
+        tool_calls = []
+        msg = reply["choices"][0]["message"]
+        if msg.get("content"):
+            text_parts.append(msg["content"])
+        for tc in msg.get("tool_calls", []):
+            try:
+                args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+            tool_calls.append({
+                "id": tc["id"],
+                "name": tc["function"]["name"],
+                "arguments": args,
+            })
+        return text_parts, tool_calls
+
+    def append_assistant(self, messages, reply):
+        messages.append(reply["choices"][0]["message"])
+
+    def append_tool_results(self, messages, results):
+        for r in results:
+            messages.append({
+                "role": "tool", "tool_call_id": r["id"], "content": r["content"],
+            })
+
+
+# Provider registry
+PROVIDERS = {}
+
+
+def _init_providers():
+    if ANTHROPIC_API_KEY:
+        PROVIDERS["anthropic"] = AnthropicProvider(ANTHROPIC_API_KEY)
+        log.info("Anthropic provider: enabled")
+    else:
+        log.info("Anthropic provider: disabled (no ANTHROPIC_API_KEY)")
+    if OPENAI_API_KEY:
+        PROVIDERS["openai"] = OpenAIProvider(OPENAI_API_KEY)
+        log.info("OpenAI provider: enabled")
+    else:
+        log.info("OpenAI provider: disabled (no OPENAI_API_KEY)")
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +178,6 @@ class MCPClient:
     def __init__(self, url):
         self.url = url
         self._tools = None
-        self._claude_tools = None
         self._lock = threading.Lock()
 
     @property
@@ -56,15 +185,15 @@ class MCPClient:
         return self._tools is not None
 
     @property
-    def claude_tools(self):
-        """Return tools in Claude format, fetching from MCP on first access."""
-        if self._claude_tools is not None:
-            return self._claude_tools
+    def tools(self):
+        """Return raw MCP tools, fetching on first access."""
+        if self._tools is not None:
+            return self._tools
         with self._lock:
-            if self._claude_tools is not None:
-                return self._claude_tools
+            if self._tools is not None:
+                return self._tools
             self._fetch_tools()
-            return self._claude_tools
+            return self._tools
 
     def _request(self, data, headers=None):
         hdrs = {"Content-Type": "application/json"}
@@ -97,12 +226,7 @@ class MCPClient:
             headers={"Mcp-Session-Id": sid},
         )
         self._tools = body["result"]["tools"]
-        self._claude_tools = [
-            {"name": t["name"], "description": t["description"][:1024],
-             "input_schema": t["inputSchema"]}
-            for t in self._tools
-        ]
-        log.info("Loaded %d MCP tools", len(self._claude_tools))
+        log.info("Loaded %d MCP tools", len(self._tools))
 
     def call_tool(self, name, arguments):
         sid = self._init_session()
@@ -117,53 +241,40 @@ class MCPClient:
 
 
 # ---------------------------------------------------------------------------
-# Claude agentic loop
+# LLM agentic loop
 # ---------------------------------------------------------------------------
 
-def ask_claude(question, mcp):
-    """Send a question to Claude, let it call MCP tools, return the final answer."""
-    claude_tools = mcp.claude_tools  # Triggers lazy MCP connection
+def ask_llm(question, mcp, provider, model):
+    """Send a question to an LLM, let it call MCP tools, return the final answer."""
+    mcp_tools = mcp.tools
+    tools = provider.format_tools(mcp_tools)
     messages = [{"role": "user", "content": question}]
     text_parts = []
 
     for _ in range(MAX_TOOL_ROUNDS):
-        req_body = json.dumps({
-            "model": ANTHROPIC_MODEL, "max_tokens": 4096,
-            "system": SYSTEM_PROMPT, "tools": claude_tools,
-            "messages": messages,
-        }).encode()
-        req = urllib.request.Request(CLAUDE_API, data=req_body, headers={
-            "Content-Type": "application/json",
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        })
+        req_body = provider.build_request(messages, tools, model)
+        req = urllib.request.Request(
+            provider.api_url, data=req_body, headers=provider.headers(),
+        )
         res = urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT)
         reply = json.loads(res.read())
 
-        text_parts = []
-        tool_calls = []
-        for block in reply["content"]:
-            if block["type"] == "text":
-                text_parts.append(block["text"])
-            elif block["type"] == "tool_use":
-                tool_calls.append(block)
+        text_parts, tool_calls = provider.parse_response(reply)
 
         if not tool_calls:
             return "\n".join(text_parts)
 
-        messages.append({"role": "assistant", "content": reply["content"]})
-        tool_results = []
+        provider.append_assistant(messages, reply)
+        results = []
         for tc in tool_calls:
-            log.info("Tool: %s(%s)", tc["name"], json.dumps(tc["input"])[:200])
+            log.info("Tool: %s(%s)", tc["name"], json.dumps(tc["arguments"])[:200])
             try:
-                result = mcp.call_tool(tc["name"], tc["input"])
+                result = mcp.call_tool(tc["name"], tc["arguments"])
             except Exception as exc:
                 log.error("MCP tool error: %s", exc)
                 result = f"Error: {exc}"
-            tool_results.append({
-                "type": "tool_result", "tool_use_id": tc["id"], "content": result,
-            })
-        messages.append({"role": "user", "content": tool_results})
+            results.append({"id": tc["id"], "content": result})
+        provider.append_tool_results(messages, results)
 
     return "\n".join(text_parts) if text_parts else "Reached maximum tool call rounds."
 
@@ -184,8 +295,8 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    mcp = None        # Set at startup
-    _index_html = b""  # Cached at startup
+    mcp = None
+    _index_html = b""
 
     def _send_json(self, status, obj):
         body = json.dumps(obj).encode()
@@ -197,6 +308,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == "/providers":
+            models = []
+            for p in PROVIDERS.values():
+                models.append({"provider": p.name, "model": p.default_model})
+            self._send_json(200, {"providers": models})
+            return
+
         if self.path != "/query":
             self._send_json(404, {"error": "Not found"})
             return
@@ -224,11 +342,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Missing or empty 'question' field"})
             return
 
+        # Resolve provider
+        provider_name = payload.get("provider", "")
+        model = payload.get("model", "")
+        provider = PROVIDERS.get(provider_name)
+        if not provider:
+            # Fall back to first available
+            provider = next(iter(PROVIDERS.values()), None)
+        if not provider:
+            self._send_json(503, {"error": "No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."})
+            return
+        if not model:
+            model = provider.default_model
+
         question = question.strip()[:2000]
-        log.info("Question: %s", question[:100])
+        log.info("Question [%s/%s]: %s", provider.name, model, question[:100])
 
         try:
-            answer = ask_claude(question, Handler.mcp)
+            answer = ask_llm(question, Handler.mcp, provider, model)
             self._send_json(200, {"answer": answer})
         except urllib.error.HTTPError as exc:
             log.error("API error: %s %s", exc.code, exc.read().decode()[:500])
@@ -276,7 +407,7 @@ def _eager_mcp_connect(mcp, retries=5, delay=5):
     import time
     for attempt in range(retries):
         try:
-            mcp.claude_tools  # Triggers the lazy connection
+            mcp.tools
             return
         except Exception as exc:
             if attempt < retries - 1:
@@ -291,8 +422,10 @@ def _eager_mcp_connect(mcp, retries=5, delay=5):
 # ---------------------------------------------------------------------------
 
 def main():
-    if not ANTHROPIC_API_KEY:
-        log.error("ANTHROPIC_API_KEY is required")
+    _init_providers()
+
+    if not PROVIDERS:
+        log.error("At least one LLM provider required. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
         sys.exit(1)
 
     # Cache static HTML
@@ -302,16 +435,13 @@ def main():
     else:
         log.warning("No index.html found at %s", index_path)
 
-    # MCP is optional at startup — connects in the background if URL is set
+    # MCP is optional at startup
     if MCP_URL:
         Handler.mcp = MCPClient(MCP_URL)
         log.info("MCP server: %s", MCP_URL)
-        # Connect eagerly in background so readiness probe passes
         threading.Thread(target=_eager_mcp_connect, args=(Handler.mcp,), daemon=True).start()
     else:
         log.warning("No MCP_URL set — queries will fail until one is configured")
-
-    log.info("Claude model: %s", ANTHROPIC_MODEL)
 
     server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
 
